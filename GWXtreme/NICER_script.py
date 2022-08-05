@@ -43,103 +43,90 @@ def plot_radii_gaussian_kde(datafile, label):
 
 class sampler:
 
-    def __init__(self):
+    def __init__(self, mr_file, spectral=True):
 
-        # parameter space bounds
-        self.p1_l_b, self.p1_u_b = 32.973, 33.888
-        self.g1_l_b, self.g1_u_b = 2.216, 4.070
-        self.g2_l_b, self.g2_u_b = 1.472, 3.791
-        self.g3_l_b, self.g3_u_b = 1.803, 3.660
+        if spectral: self.priorbounds = {'gamma1':{'params':{"min":0.2,"max":2.00}},'gamma2':{'params':{"min":-1.6,"max":1.7}},'gamma3':{'params':{"min":-0.6,"max":0.6}},'gamma4':{'params':{"min":-0.02,"max":0.02}}}
+        else: self.priorbounds = {'logP':{'params':{"min":32.6,"max":33.5}},'gamma1':{'params':{"min":2.0,"max":4.5}},'gamma2':{'params':{"min":1.1,"max":4.5}},'gamma3':{'params':{"min":1.1,"max":4.5}}}
+        self.spectral = spectral
 
-    def obtain_kernel(self, filename):
-
-        masses, radii = np.loadtxt(filename, unpack=True) # Mass Radius distribution of mock data
+        masses, radii = np.loadtxt(mr_file, unpack=True) # Mass Radius distribution of mock data
         pairs = np.vstack([masses, radii])
         self.kernel = st.gaussian_kde(pairs)
 
-    def log_posterior(self, parameters):
+    def log_prior(self, params):
 
-        p1, g1, g2, g3 = parameters
+        g1_p1, g2_g1, g3_g2, g4_g3 = parameters
+        
+        if spectral: params = {"gamma1":np.array([g1_p1]),"gamma2":np.array([g2_g1]),"gamma3":np.array([g3_g2]),"gamma4":np.array([g4_g3])}
+        else: params = {"logP":np.array([g1_p1]),"gamma1":np.array([g2_g1]),"gamma2":np.array([g3_g2]),"gamma3":np.array([g4_g3])}
 
-        return self.log_likelihood(parameters) + self.log_prior(parameters)
+        if is_valid_eos(params,self.priorbounds,spectral=self.spectral): return 0
+        else: return - np.inf
 
     def log_likelihood(self, params, kernel):
         # Finds integral of eos curve over the kde of a mass-radius posterior sample
 
-        p1, g1, g2, g3 = params
+        g1_p1, g2_g1, g3_g2, g4_g3 = parameters
 
-        # MCMC code travels outside the parameter space sometimes; if statement is
-        # needed to make sure eos pointer isn't made (resulting in a seg fault)
-        if ((self.p1_l_b <= p1 <= self.p1_u_b) & (self.g1_l_b <= g1 <= self.g1_u_b) &
-            (self.g2_l_b <= g2 <= self.g2_u_b) & (self.g3_l_b <= g3 <= self.g3_u_b)):
-            try: 
-                eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(log_p1_SI, g1, g2, g3)
-                fam = lalsim.CreateSimNeutronStarFamily(eos)
-                m_min = 1.0
-                max_mass = lalsim.SimNeutronStarMaximumMass(fam)/lal.MSUN_SI
-                max_mass = int(max_mass*1000)/1000
-                m_grid = np.linspace(m_min, max_mass, 1000)
-                m_grid = m_grid[m_grid <= max_mass]
+        if spectral: params = {"gamma1":np.array([g1_p1]),"gamma2":np.array([g2_g1]),"gamma3":np.array([g3_g2]),"gamma4":np.array([g4_g3])}
+        else: params = {"logP":np.array([g1_p1]),"gamma1":np.array([g2_g1]),"gamma2":np.array([g3_g2]),"gamma3":np.array([g4_g3])}
 
-                working_masses = []
-                working_radii = []
-                for m in m_grid:
-                    try:
-                        r = lalsim.SimNeutronStarRadius(m*lal.MSUN_SI, fam)
-                        working_masses.append(m)
-                        working_radii.append(r)
-                    except RuntimeError:
-                        continue
+        if is_valid_eos(params,self.priorbounds,spectral=self.spectral):
 
-                return np.log(np.sum(np.array(kernel(np.vstack([working_masses, working_radii])))*np.diff(working_masses)[0]))
+            eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(g1_p1, g2_g1, g3_g2, g4_g3)
+            fam = lalsim.CreateSimNeutronStarFamily(eos)
+            m_min = 1.0
+            max_mass = lalsim.SimNeutronStarMaximumMass(fam)/lal.MSUN_SI
+            max_mass = int(max_mass*1000)/1000
+            m_grid = np.linspace(m_min, max_mass, 1000)
+            m_grid = m_grid[m_grid <= max_mass]
 
+            working_masses = []
+            working_radii = []
+            for m in m_grid:
+                try:
+                    r = lalsim.SimNeutronStarRadius(m*lal.MSUN_SI, fam)
+                    working_masses.append(m)
+                    working_radii.append(r)
+                except RuntimeError:
+                    continue
+
+            try: return np.log(np.sum(np.array(kernel(np.vstack([working_masses, working_radii])))*np.diff(working_masses)[0]))
             except RuntimeError: return - np.inf
             except IndexError: return - np.inf
-        else:
-            return - np.inf
 
-    def log_prior(self, parameters):
+        else: return - np.inf
 
-        p1, g1, g2, g3 = parameters
+    def log_posterior(self, params):
 
-        # If sample values are within bounds, return 0, Else return - infinite
-        if ((self.p1_l_b <= p1 <= self.p1_u_b) & (self.g1_l_b <= g1 <= self.g1_u_b) &
-            (self.g2_l_b <= g2 <= self.g2_u_b) & (self.g3_l_b <= g3 <= self.g3_u_b)):
-            return 0
-        else:
-            return - np.inf
+        return self.log_likelihood(params) + self.log_prior(params)
 
     # randomly selected walker starting points
     def n_walker_points(self, walkers):
 
-        p1_incr, g1_incr, g2_incr, g3_incr = .4575, .927, 1.1595, .9285
-        log_p1_SI,g1,g2,g3 = 33.4305,3.143,2.6315,2.7315 # defaults
-
+        bounds = list(self.priorbounds.values())
         points = []
-        for walker in range(walkers):
+        while len(points) <= walkers:
 
-            p1_choice = ((log_p1_SI - p1_incr) +
-                        ((2 * p1_incr) * np.random.random()))
-            g1_choice = ((g1 - g1_incr) +
-                        ((2 * g1_incr) * np.random.random()))
-            g2_choice = ((g2 - g2_incr) +
-                        ((2 * g2_incr) * np.random.random()))
-            g3_choice = ((g3 - g3_incr) +
-                        ((2 * g3_incr) * np.random.random()))
+            g1_p1_choice = np.random.randint(bounds[0]['params']['min'],bounds[0]['params']['max'],1)[0]
+            g2_g1_choice = np.random.randint(bounds[1]['params']['min'],bounds[1]['params']['max'],1)[0]
+            g3_g2_choice = np.random.randint(bounds[2]['params']['min'],bounds[2]['params']['max'],1)[0]
+            g4_g3_choice = np.random.randint(bounds[3]['params']['min'],bounds[3]['params']['max'],1)[0]
 
-            points.append([p1_choice,g1_choice,g2_choice,g3_choice])
+            if is_valid_eos(params,self.priorbounds,spectral=self.spectral): points.append([p1_choice,g1_choice,g2_choice,g3_choice])
 
         return(np.array(points))
 
-    def run_mcmc(self, label, sample_size=5000):
+    def run_mcmc(self, label=None, nwalkers=10, sample_size=5000):
 
-        ndim, nwalkers = 4, 10
+        ndim = 4
         p0 = self.n_walker_points(nwalkers)
 
         sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_posterior)
         sampler.run_mcmc(p0, sample_size)
         flat_samples = sampler.get_chain(discard=100, thin=15, flat=True)
-        outputfile = "emcee_files/runs/{}.txt".format(label)
+        if label == None: label = ""
+        outputfile = "./samples{}.txt".format(label)
         np.savetxt(outputfile, flat_samples)
 
 def p_vs_rho(filename, label, N, plot=True):
@@ -204,6 +191,9 @@ def p_vs_rho(filename, label, N, plot=True):
     if plot:
 
         pl.clf()
+        #pl.rcParams.update({'font.size': 18})
+        #pl.figure(figsize=(15, 10))
+
         min_log_pressure = 32.0
         eos = lalsim.SimNeutronStarEOSByName("APR4_EPP")
         max_log_pressure = np.log10(lalsim.SimNeutronStarEOSMaxPressure(eos))
