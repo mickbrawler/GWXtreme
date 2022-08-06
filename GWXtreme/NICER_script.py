@@ -1,14 +1,18 @@
+from GWXtreme import eos_model_selection as ems
+from GWXtreme import eos_prior as ep
 import lalsimulation as lalsim
 import lal
 import numpy as np
-import matplotlib as pl
-import seaborn as sns
+import matplotlib.pyplot as pl
 import glob
 import scipy.stats as st
 import os
 import emcee
+import math
+import random
+from multiprocessing import cpu_count, Pool
 
-def plot_radii_gaussian_kde(datafile, label):
+def plot_radii_gaussian_kde(datafile, label=None):
     # Plot the meshgrid & scatter of a mass-radius distribution
 
     pl.clf()
@@ -39,9 +43,10 @@ def plot_radii_gaussian_kde(datafile, label):
     ax.set_ylabel('Radius (km)')
     pl.scatter(m,r,s=1,color="black")
     pl.title("Mass-Radius Distribution")
-    pl.savefig("NICER_mock_data/radii_heat_plots/{}.png".format(label), bbox_inches='tight') # label="APR4_EPP_m(m_sigma)_r(r_sigma)_kde_mesh_scatter"
+    if label == None: label = ""
+    pl.savefig("./mr_plot{}.png".format(label), bbox_inches='tight') # label="APR4_EPP_m(m_sigma)_r(r_sigma)_kde_mesh_scatter"
 
-class sampler:
+class parametric_EoS:
 
     def __init__(self, mr_file, spectral=True):
 
@@ -53,17 +58,17 @@ class sampler:
         pairs = np.vstack([masses, radii])
         self.kernel = st.gaussian_kde(pairs)
 
-    def log_prior(self, params):
+    def log_prior(self, parameters):
 
         g1_p1, g2_g1, g3_g2, g4_g3 = parameters
         
         if spectral: params = {"gamma1":np.array([g1_p1]),"gamma2":np.array([g2_g1]),"gamma3":np.array([g3_g2]),"gamma4":np.array([g4_g3])}
         else: params = {"logP":np.array([g1_p1]),"gamma1":np.array([g2_g1]),"gamma2":np.array([g3_g2]),"gamma3":np.array([g4_g3])}
 
-        if is_valid_eos(params,self.priorbounds,spectral=self.spectral): return 0
+        if ep.is_valid_eos(params,self.priorbounds,spectral=self.spectral): return 0
         else: return - np.inf
 
-    def log_likelihood(self, params, kernel):
+    def log_likelihood(self, parameters):
         # Finds integral of eos curve over the kde of a mass-radius posterior sample
 
         g1_p1, g2_g1, g3_g2, g4_g3 = parameters
@@ -71,7 +76,7 @@ class sampler:
         if spectral: params = {"gamma1":np.array([g1_p1]),"gamma2":np.array([g2_g1]),"gamma3":np.array([g3_g2]),"gamma4":np.array([g4_g3])}
         else: params = {"logP":np.array([g1_p1]),"gamma1":np.array([g2_g1]),"gamma2":np.array([g3_g2]),"gamma3":np.array([g4_g3])}
 
-        if is_valid_eos(params,self.priorbounds,spectral=self.spectral):
+        if ep.is_valid_eos(params,self.priorbounds,spectral=self.spectral):
 
             eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(g1_p1, g2_g1, g3_g2, g4_g3)
             fam = lalsim.CreateSimNeutronStarFamily(eos)
@@ -91,7 +96,7 @@ class sampler:
                 except RuntimeError:
                     continue
 
-            try: return np.log(np.sum(np.array(kernel(np.vstack([working_masses, working_radii])))*np.diff(working_masses)[0]))
+            try: return math.log(np.sum(np.array(self.kernel(np.vstack([working_masses, working_radii])))*np.diff(working_masses)[0]))
             except RuntimeError: return - np.inf
             except IndexError: return - np.inf
 
@@ -108,28 +113,34 @@ class sampler:
         points = []
         while len(points) <= walkers:
 
-            g1_p1_choice = np.random.randint(bounds[0]['params']['min'],bounds[0]['params']['max'],1)[0]
-            g2_g1_choice = np.random.randint(bounds[1]['params']['min'],bounds[1]['params']['max'],1)[0]
-            g3_g2_choice = np.random.randint(bounds[2]['params']['min'],bounds[2]['params']['max'],1)[0]
-            g4_g3_choice = np.random.randint(bounds[3]['params']['min'],bounds[3]['params']['max'],1)[0]
+            g1_p1_choice = random.uniform(bounds[0]['params']['min'],bounds[0]['params']['max'])
+            g2_g1_choice = random.uniform(bounds[1]['params']['min'],bounds[1]['params']['max'])
+            g3_g2_choice = random.uniform(bounds[2]['params']['min'],bounds[2]['params']['max'])
+            g4_g3_choice = random.uniform(bounds[3]['params']['min'],bounds[3]['params']['max'])
 
-            if is_valid_eos(params,self.priorbounds,spectral=self.spectral): points.append([p1_choice,g1_choice,g2_choice,g3_choice])
+            if self.spectral: params = {"gamma1":np.array([g1_p1_choice]),"gamma2":np.array([g2_g1_choice]),"gamma3":np.array([g3_g2_choice]),"gamma4":np.array([g4_g3_choice])}
+            else: params = {"logP":np.array([g1_p1_choice]),"gamma1":np.array([g2_g1_choice]),"gamma2":np.array([g3_g2_choice]),"gamma3":np.array([g4_g3_choice])}
+            if ep.is_valid_eos(params,self.priorbounds,spectral=self.spectral): points.append([g1_p1_choice,g2_g1_choice,g3_g2_choice,g4_g3_choice])
 
-        return(np.array(points))
+        return np.array(points)
 
-    def run_mcmc(self, label=None, nwalkers=10, sample_size=5000):
+    def run_mcmc(self, label=None, sample_size=5000, nwalkers=10, npool=10):
 
         ndim = 4
         p0 = self.n_walker_points(nwalkers)
 
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_posterior)
-        sampler.run_mcmc(p0, sample_size)
+        with Pool(min(cpu_count(),npool)) as pool:
+
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_posterior,pool=pool)
+            sampler.run_mcmc(p0, sample_size, progress=True)
+
         flat_samples = sampler.get_chain(discard=100, thin=15, flat=True)
+
         if label == None: label = ""
         outputfile = "./samples{}.txt".format(label)
         np.savetxt(outputfile, flat_samples)
 
-def p_vs_rho(filename, label, N, plot=True):
+def p_vs_rho(filename, N, label=None, plot=True):
 
     samples = np.loadtxt(filename)
 
@@ -185,7 +196,8 @@ def p_vs_rho(filename, label, N, plot=True):
 
     logp_grid = logp_grid[~np.isin(logp_grid,trouble_p_vals)]
     rho_vals = [logp_grid, lower_bound, median, upper_bound]
-    outputfile = "emcee_files/runs/p_vs_rho_{}.txt".format(label)
+    if label == None: label = ""
+    outputfile = "./p_vs_rho{}.txt".format(label)
     np.savetxt(outputfile, rho_vals)
 
     if plot:
@@ -219,5 +231,5 @@ def p_vs_rho(filename, label, N, plot=True):
         pl.ylabel("Log Pressure")
         pl.title("Pressure vs Density")
         pl.legend()
-        pl.savefig("emcee_files/plots/p_vs_rho_{}.png".format(label), bbox_inches='tight')
+        pl.savefig("./p_vs_rho{}.png".format(label), bbox_inches='tight')
 
