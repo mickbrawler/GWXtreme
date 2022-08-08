@@ -77,25 +77,27 @@ class parametric_EoS:
 
         if ep.is_valid_eos(params,self.priorbounds,spectral=self.spectral):
 
-            eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(g1_p1, g2_g1, g3_g2, g4_g3)
-            fam = lalsim.CreateSimNeutronStarFamily(eos)
-            m_min = 1.0
-            max_mass = lalsim.SimNeutronStarMaximumMass(fam)/lal.MSUN_SI
-            max_mass = int(max_mass*1000)/1000
-            m_grid = np.linspace(m_min, max_mass, self.N)
-            m_grid = m_grid[m_grid <= max_mass]
+            try:
+                if self.spectral: eos = lalsim.SimNeutronStarEOS4ParameterSpectralDecomposition(g1_p1, g2_g1, g3_g2, g4_g3)
+                else: eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(g1_p1, g2_g1, g3_g2, g4_g3)
+                fam = lalsim.CreateSimNeutronStarFamily(eos)
+                m_min = 1.0
+                max_mass = lalsim.SimNeutronStarMaximumMass(fam)/lal.MSUN_SI
+                max_mass = int(max_mass*1000)/1000
+                m_grid = np.linspace(m_min, max_mass, self.N)
+                m_grid = m_grid[m_grid <= max_mass]
 
-            working_masses = []
-            working_radii = []
-            for m in m_grid:
-                try:
-                    r = lalsim.SimNeutronStarRadius(m*lal.MSUN_SI, fam)
-                    working_masses.append(m)
-                    working_radii.append(r)
-                except RuntimeError:
-                    continue
+                working_masses = []
+                working_radii = []
+                for m in m_grid:
+                    try:
+                        r = lalsim.SimNeutronStarRadius(m*lal.MSUN_SI, fam)
+                        working_masses.append(m)
+                        working_radii.append(r)
+                    except RuntimeError:
+                        continue
 
-            try: return math.log(np.sum(np.array(self.kernel(np.vstack([working_masses, working_radii])))*np.diff(working_masses)[0]))
+                return math.log(np.sum(np.array(self.kernel(np.vstack([working_masses, working_radii])))*np.diff(working_masses)[0]))
             except RuntimeError: return - np.inf
             except IndexError: return - np.inf
 
@@ -104,7 +106,6 @@ class parametric_EoS:
     def log_posterior(self, parameters):
 
         return self.log_likelihood(parameters) + self.log_prior(parameters)
-        print("ran posterior")
 
     # randomly selected walker starting points
     def n_walker_points(self, walkers):
@@ -127,28 +128,25 @@ class parametric_EoS:
 
         ndim = 4
         p0 = self.n_walker_points(nwalkers)
-        print("past starting points")
 
         if npool > 1:
 
             with Pool(min(cpu_count(),npool)) as pool:
 
                 sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_posterior,pool=pool)
-                print("past sampler creation")
                 sampler.run_mcmc(p0, sample_size, progress=True)
-                print("past sampler launch")
 
                 flat_samples = sampler.get_chain(discard=100, thin=15, flat=True)
         else:
 
             sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_posterior)
-            print("past sampler creation")
             sampler.run_mcmc(p0, sample_size, progress=True)
-            print("past sampler launch")
             flat_samples = sampler.get_chain(discard=100, thin=15, flat=True)
 
         if label == None: label = ""
-        outputfile = "./samples{}.txt".format(label)
+        if self.spectral: model = "spectral"
+        else: model = "piecewise"
+        outputfile = "./{}_samples{}.txt".format(model,label)
         np.savetxt(outputfile, flat_samples)
 
 def p_vs_rho(filename, N=1000, label=None, plot=True):
@@ -208,7 +206,9 @@ def p_vs_rho(filename, N=1000, label=None, plot=True):
     logp_grid = logp_grid[~np.isin(logp_grid,trouble_p_vals)]
     rho_vals = [logp_grid, lower_bound, median, upper_bound]
     if label == None: label = ""
-    outputfile = "./p_vs_rho{}.txt".format(label)
+    if self.spectral: model = "spectral"
+    else: model = "piecewise"
+    outputfile = "./{}_p_vs_rho{}.txt".format(model,label)
     np.savetxt(outputfile, rho_vals)
 
     if plot:
@@ -240,5 +240,5 @@ def p_vs_rho(filename, N=1000, label=None, plot=True):
         pl.ylabel("Log Pressure")
         pl.title("Pressure vs Density")
         #pl.legend()
-        pl.savefig("./p_vs_rho{}.png".format(label), bbox_inches='tight')
+        pl.savefig("./{}_p_vs_rho{}.png".format(model,label), bbox_inches='tight')
 
