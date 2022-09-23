@@ -7,6 +7,7 @@ import matplotlib.pyplot as pl
 import glob
 import scipy.stats as st
 import os
+import json
 import emcee
 import math
 import random
@@ -125,6 +126,7 @@ class parametric_EoS:
         return np.array(points)
 
     def run_mcmc(self, label=None, sample_size=5000, nwalkers=10, npool=10):
+        # Samples in parametric space.
 
         ndim = 4
         p0 = self.n_walker_points(nwalkers)
@@ -146,53 +148,66 @@ class parametric_EoS:
         if label == None: label = ""
         if self.spectral: model = "spectral"
         else: model = "piecewise"
-        outputfile = "./{}_samples{}.txt".format(model,label)
+        outputfile = "./{}_samples_{}.txt".format(model,label)
         np.savetxt(outputfile, flat_samples)
 
-def p_vs_rho(filename, N=1000, label=None, plot=True):
-
-    samples = np.loadtxt(filename)
-
-    max_log_pressures = []
-    for sample in samples: # Obtain max pressure for each sample
-
-        p1, g1, g2, g3 = sample
-        eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(p1,g1,g2,g3)
-        max_log_pressure = np.log10(lalsim.SimNeutronStarEOSMaxPressure(eos))
-        max_log_pressures.append(max_log_pressure)
-
-    global_max_log_pressure = max(max_log_pressures) # max maximum pressure
-
+def p_vs_rho(filename, N=1000, label=None, plot=True, spectral=True):
+    # Saves logp_grid, lower_bound, median, upper_bound of parametric 
+    # distribution. Can plot too.
+    
     min_log_pressure = 32.0
-    logp_grid = np.linspace(min_log_pressure, global_max_log_pressure, N)
+    if spectral: max_log_pressure = 37.06469815599594
+    else: max_log_pressure = 35.400799437198074
 
-    density_matrix = []
-    for lp in logp_grid:
+    logp_grid = np.linspace(min_log_pressure, max_log_pressure, N)
+    if spectral: logp_grid = logp_grid[:-1] # last val is max log pressure. For spectral, density calculation at this pressure cause runtime error
 
-        density_grid = []
-        for sample in samples:
+    if filename[-3:] == "txt":
 
-            p1, g1, g2, g3 = sample
-            eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(p1,g1,g2,g3)
-            density_grid.append(lalsim.SimNeutronStarEOSEnergyDensityOfPressure(10**lp, eos)/lal.C_SI**2)
+        samples = np.loadtxt(filename)
+        
+        # Part of previous study
+        #max_log_pressures = []
+        #for sample in samples: # Obtain max pressure for each sample
 
-        density_matrix.append(density_grid)
+            #g1_p1, g2_g1, g3_g2, g4_g3 = sample
+            #try:
+                #if spectral: eos = lalsim.SimNeutronStarEOS4ParameterSpectralDecomposition(g1_p1,g2_g1,g3_g2,g4_g3)
+                #else: eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(g1_p1,g2_g1,g3_g2,g4_g3)
+            #except RuntimeError: continue
+            #max_log_pressure = np.log10(lalsim.SimNeutronStarEOSMaxPressure(eos))
+            #max_log_pressures.append(max_log_pressure)
+
+        #global_max_log_pressure = max(max_log_pressures) # max maximum pressure
+
+        density_matrix = []
+        for lp in logp_grid:
+
+            density_grid = []
+            for sample in samples:
+
+                g1_p1, g2_g1, g3_g2, g4_g3 = sample
+                try:
+                    if spectral: eos = lalsim.SimNeutronStarEOS4ParameterSpectralDecomposition(g1_p1,g2_g1,g3_g2,g4_g3)
+                    else: eos = lalsim.SimNeutronStarEOS4ParameterPiecewisePolytrope(g1_p1,g2_g1,g3_g2,g4_g3)
+                    density_grid.append(lalsim.SimNeutronStarEOSEnergyDensityOfPressure(10**lp, eos)/lal.C_SI**2)
+                except RuntimeError: continue # ran into runtime error at some point due to energydensityofpressure function
+
+            density_matrix.append(density_grid)
+    else:
+
+        with open(filename, "r") as f:
+            data = json.load(f)
+
+        density_matrix = list(data.values())
 
     lower_bound = []
     median = []
     upper_bound = []
-    trouble_p_vals = []
     counter = 0
     for p_rhos in density_matrix:
 
-        try:
-            bins, bin_bounds = np.histogram(p_rhos,bins=50,density=True)
-            counter += 1
-        except IndexError: # Meant to catch error in density (low pressure) region. Doesn't apply anymore
-            trouble_p_vals.append(logp_grid[counter])
-            counter += 1
-            continue
-
+        bins, bin_bounds = np.histogram(p_rhos,bins=50,density=True)
         bin_centers = (bin_bounds[1:] + bin_bounds[:-1]) / 2
         order = np.argsort(-bins)
         bins_ordered = bins[order]
@@ -203,27 +218,16 @@ def p_vs_rho(filename, N=1000, label=None, plot=True):
         median.append(np.median(p_rhos))
         upper_bound.append(max(bin_cent_ord[include]))
 
-    logp_grid = logp_grid[~np.isin(logp_grid,trouble_p_vals)]
     rho_vals = [logp_grid, lower_bound, median, upper_bound]
     if label == None: label = ""
-    if self.spectral: model = "spectral"
+    if spectral: model = "spectral"
     else: model = "piecewise"
-    outputfile = "./{}_p_vs_rho{}.txt".format(model,label)
+    outputfile = "./{}_p_vs_rho_{}.txt".format(model,label)
     np.savetxt(outputfile, rho_vals)
 
     if plot:
 
         pl.clf()
-
-        min_log_pressure = 32.0
-        eos = lalsim.SimNeutronStarEOSByName("APR4_EPP")
-        max_log_pressure = np.log10(lalsim.SimNeutronStarEOSMaxPressure(eos))
-        logp_grid = np.linspace(min_log_pressure, max_log_pressure, N)
-
-        density_grid = []
-        for lp in logp_grid:
-
-            density_grid.append(lalsim.SimNeutronStarEOSEnergyDensityOfPressure(10**lp, eos)/lal.C_SI**2)
 
         ax = pl.gca()
         ax.set_xscale("log")
@@ -233,12 +237,10 @@ def p_vs_rho(filename, N=1000, label=None, plot=True):
         pl.plot(upper_bound, logp_grid, color="blue")
         ax.fill_betweenx(logp_grid, lower_bound, x2=upper_bound, color="blue", alpha=0.5)
         pl.plot(median, logp_grid, "k--")
-        #pl.plot(density_grid, logp_grid, "r-", label="APR4_EPP")
 
         pl.xlim([10**17, 10**19])
         pl.xlabel("Density")
         pl.ylabel("Log Pressure")
         pl.title("Pressure vs Density")
-        #pl.legend()
-        pl.savefig("./{}_p_vs_rho{}.png".format(model,label), bbox_inches='tight')
+        pl.savefig("./{}_p_vs_rho_{}.png".format(model,label), bbox_inches='tight')
 
