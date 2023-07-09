@@ -72,8 +72,16 @@ def get_LambdaT_for_eos(m1, m2, max_mass_eos, eosfunc):
 
     # compute chirp tidal deformability
     LambdaT = getLambdaT(m1, m2, Lambda1, Lambda2)
-
     return LambdaT
+
+
+def get_compactness_for_eos(mass, eosfunc):
+    '''
+    This function accepts the masses and an equation of state interpolant
+    with its maximum allowed mass, and return the values of compactness.
+    '''
+    compactness = eosfunc(mass)
+    return compactness
 
 
 # The integrator function #
@@ -81,7 +89,7 @@ def integrator(q_min, q_max, mc, eosfunc, max_mass_eos, postfunc,
                gridN=1000, var_LambdaT=1.0, var_q=1.0, minMass=0.1):
     '''
     This function numerically integrates the KDE along the
-    EoS curve.
+    mass ratio q - lambda tilda Λ~ EoS curve.
 
     q_min  	:: Minimum value of mass-ratio for the EoS curve
 
@@ -108,8 +116,8 @@ def integrator(q_min, q_max, mc, eosfunc, max_mass_eos, postfunc,
     allowed by the EoS, then the object(s) is(are) treated as
     BH (Λ=0). If the masses are below the minimum mass, the
     points are excludeds from the integral.
-
     '''
+
     # scale these appropriately to evaluate prior bounds
     q_min *= var_q
     q_max *= var_q
@@ -129,8 +137,37 @@ def integrator(q_min, q_max, mc, eosfunc, max_mass_eos, postfunc,
     f = postfunc.evaluate(np.vstack((LambdaT_scaled, q_scaled)).T)
     f_centers = 0.5*(f[1:] + f[:-1])
     int_element = f_centers * dq
-
     return [LambdaT_scaled, q_scaled, np.sum(int_element)]
+
+
+def integratorEM(eosfunc, max_mass_eos, postfunc, gridN=1000, minMass=0.1):
+    '''
+    This function numerically integrates the KDE along the
+    compactness c - mass m EoS curve.
+
+    eosfunc	 :: interpolation function of c = eosfunc(m)
+
+    max_mass_eos :: Maximum mass allowed by the EoS.
+
+    postfunc :: K(m, c) KDE of the posterior distr
+
+    gridN  :: Number of steps for the integration (default=1K)
+
+    minMass :: The value of the minimum mass for the lines integration
+    '''
+
+    # get values for line integral
+    mass = np.linspace(minMass, max_mass_eos, gridN)
+    # get_compactness_for_eos
+    compactness = eosfunc(mass)
+
+    # perform integration via trapazoidal approximation
+    dm = np.diff(mass)
+    f = postfunc.evaluate(np.vstack((mass, compactness)).T)
+    f_centers = 0.5*(f[1:] + f[:-1])
+    int_element = f_centers * dm
+    return [mass, compactness, np.sum(int_element)]
+
 
 def apply_mass_constraint(m1, m2, q, minMass):
     '''
@@ -145,8 +182,9 @@ def apply_mass_constraint(m1, m2, q, minMass):
     q = q[~min_mass_violation]
     return (m1, m2, q)
 
+
 @ray.remote
-def get_trials(fd):
+def get_trials(fd, useEM=False):
     support2D1_list = []
     support2D2_list = []
     for ii in range(fd['trials']):
@@ -174,22 +212,35 @@ def get_trials(fd):
                                  bw=fd['bw'])
 
         # integrate to get support
-        [this_lambdat_eos1, this_q_eos1,
-         this_support2D1] = integrator(fd['q_min'], fd['q_max'],
-                                       fd['mc_mean'], fd['s1'],
-                                       fd['max_mass_eos1'], new_kde,
-                                       gridN=fd['gridN'],
-                                       var_LambdaT=fd['var_LambdaT'],
-                                       var_q=fd['var_q'],
-                                       minMass=fd['minMass'])
-        [this_lambdat_eos2, this_q_eos2,
-         this_support2D2] = integrator(fd['q_min'], fd['q_max'],
-                                       fd['mc_mean'], fd['s2'],
-                                       fd['max_mass_eos2'], new_kde,
-                                       gridN=fd['gridN'],
-                                       var_LambdaT=fd['var_LambdaT'],
-                                       var_q=fd['var_q'],
-                                       minMass=fd['minMass'])
+        if useEM==False:
+            [this_lambdat_eos1, this_q_eos1,
+             this_support2D1] = integrator(fd['q_min'], fd['q_max'],
+                                           fd['mc_mean'], fd['s1'],
+                                           fd['max_mass_eos1'], new_kde,
+                                           gridN=fd['gridN'],
+                                           var_LambdaT=fd['var_LambdaT'],
+                                           var_q=fd['var_q'],
+                                           minMass=fd['minMass'])
+
+            [this_lambdat_eos2, this_q_eos2,
+             this_support2D2] = integrator(fd['q_min'], fd['q_max'],
+                                           fd['mc_mean'], fd['s2'],
+                                           fd['max_mass_eos2'], new_kde,
+                                           gridN=fd['gridN'],
+                                           var_LambdaT=fd['var_LambdaT'],
+                                           var_q=fd['var_q'],
+                                           minMass=fd['minMass'])
+
+        else:
+            [this_mass_eos1, this_compactness_eos1,
+             this_support2D1] = integratorEM(fd['s1'], fd['max_mass_eos1'], 
+                                             new_kde, gridN=fd['gridN'],
+                                             minMass=fd['minMass'])
+            [this_mass_eos2, this_compactness_eos2,
+             this_support2D2] = integratorEM(fd['s2'], fd['max_mass_eos2'], 
+                                             new_kde, gridN=fd['gridN'],
+                                             minMass=fd['minMass'])
+
         # store the result
         support2D1_list.append(this_support2D1)
         support2D2_list.append(this_support2D2)
@@ -199,14 +250,20 @@ def get_trials(fd):
 
 
 class Model_selection:
-    def __init__(self, posteriorFile, priorFile=None, spectral=False,Ns=None):
+    def __init__(self, posteriorFile, priorFile=None, spectral=False, Ns=None,
+                 useEM=False):
         '''
         Initiates the Bayes factor calculator with the posterior
-        samples from the uniform LambdaT, dLambdaT parameter
-        estimation runs.
+        samples from either the uniform LambdaT, dLambdaT parameter
+        estimation runs or the NICER parameter estimation runs.
 
-        posteriorFile :: The full path to the posterior_samples.dat
-                         file
+        posteriorFile :: The full path to the posterior samples files of GW
+                         source files and/or EM source files. Examples given:
+                         
+                         If single string is provided:
+                         "GW_post.dat" is assumed
+                         or if useEM=True,
+                         "EM_post.txt" is assumed
 
         priorFile     :: The full path to the priors file (optional).
                          If the prior file is supplied, the mass
@@ -220,56 +277,94 @@ class Model_selection:
                          
         Ns            :: Number of Samples to be used for KDE. (Using all samples 
                          from PE will make it very slow)
-                         
+
+        useEM         :: Distinguishes between use of GW or EM source data. If 
+                         set True, the electromagnetic sourced compactness - mass 
+                         posterior file supplied will be used to compute the EoS' 
+                         evidence.
         '''
-        if(posteriorFile[-2:]=='h5'):
-            f=h5py.File(posteriorFile,'r')
-            _data=np.array(f['TaylorF2-LS']['posterior_samples'])
-            f.close()
-            (m1,m2,q,mc,LambdaT)=(np.array(_data['mass_1_source']),
-                                        np.array(_data['mass_2_source']),
-                                        np.array(_data['mass_ratio']),
-                                        np.array(_data['chirp_mass_source']),
-                                        np.array(_data['lambda_tilde']))
+
+        if useEM==False:
+            if(posteriorFile[-2:]=='h5'):
+                f=h5py.File(posteriorFile,'r')
+                _data=np.array(f['TaylorF2-LS']['posterior_samples'])
+                f.close()
+                (m1,m2,q,mc,LambdaT)=(np.array(_data['mass_1_source']),
+                                            np.array(_data['mass_2_source']),
+                                            np.array(_data['mass_ratio']),
+                                            np.array(_data['chirp_mass_source']),
+                                            np.array(_data['lambda_tilde']))
+            else:
+                _data = np.recfromtxt(posteriorFile, names=True)
+                (m1,m2,q,mc,LambdaT)=(np.array(_data['m1_source']),
+                                            np.array(_data['m2_source']),
+                                            np.array(_data['q']),
+                                            np.array(_data['mc_source']),
+                                            np.array(_data['lambdat']))
+            data={'m1_source':m1,'m2_source':m2,'q':q,'mc_source':mc,'lambdat':LambdaT}
+            Ns_orig = len(q)
+            self.data = {k:data[k][0::int(Ns_orig/Ns)] for k in list(data.keys())}
+
+            if priorFile:
+                self.prior = np.recfromtxt(priorFile, names=True)
+                self.minMass = np.min(self.prior['m2_source'])
+                self.maxMass = np.max(self.prior['m1_source'])
+                self.q_max = np.max(self.prior['q'])
+                self.q_min = np.min(self.prior['q'])
+            else:
+                self.prior = None
+                self.minMass = np.min(self.data['m2_source'])  # min posterior mass
+                self.maxMass = np.max(self.data['m1_source'])  # max posterior mass
+                self.q_max = np.max(self.data['q'])
+                self.q_min = np.min(self.data['q'])
+
+            # store useful parameters
+            self.mc_mean = np.mean(self.data['mc_source'])
+
+            # whiten data
+            self.var_LambdaT = np.std(self.data['lambdat'])
+            self.var_q = np.std(self.data['q'])
+
+            self.q_max /= self.var_q
+            self.q_min /= self.var_q
+            self.yhigh = 1.0/self.var_q  # For reflection boundary condition
+
+            self.margPostData = np.vstack((self.data['lambdat']/self.var_LambdaT,
+                                           self.data['q']/self.var_q)).T
+
         else:
-            _data = np.recfromtxt(posteriorFile, names=True)
-            (m1,m2,q,mc,LambdaT)=(np.array(_data['m1_source']),
-                                        np.array(_data['m2_source']),
-                                        np.array(_data['q']),
-                                        np.array(_data['mc_source']),
-                                        np.array(_data['lambdat']))
-        data={'m1_source':m1,'m2_source':m2,'q':q,'mc_source':mc,'lambdat':LambdaT}
-        Ns_orig = len(q)
-        if(Ns is None or Ns>Ns_orig):
-            Ns = Ns_orig #By default we use all the posterior samples without thinning
-        self.data = {k:data[k][0::int(Ns_orig/Ns)] for k in list(data.keys())}
-        
-        if priorFile:
-            self.prior = np.recfromtxt(priorFile, names=True)
-            self.minMass = np.min(self.prior['m2_source'])
-            self.maxMass = np.max(self.prior['m1_source'])
-            self.q_max = np.max(self.prior['q'])
-            self.q_min = np.min(self.prior['q'])
-        else:
-            self.prior = None
-            self.minMass = np.min(self.data['m2_source'])  # min posterior mass
-            self.maxMass = np.max(self.data['m1_source'])  # max posterior mass
-            self.q_max = np.max(self.data['q'])
-            self.q_min = np.min(self.data['q'])
+            data=np.loadtxt(posteriorFile, unpack=True)
+            (self.mass, self.compactness) = (data[0], data[1])
+
+            data={'mass':self.mass,'compactness':self.compactness}
+            Ns_orig = len(self.mass)
+            self.data = {k:data[k][0::int(Ns_orig/Ns)] for k in list(data.keys())}
+            
+            if priorFile:
+                self.prior = np.recfromtxt(priorFile, names=True)
+                self.minMass = np.min(self.prior['mass'])
+                self.maxMass = np.max(self.prior['mass'])
+                self.maxCompactness = np.max(self.prior['compactness'])
+                self.minCompactness = np.min(self.prior['compactness'])
+            else:
+                self.prior = None
+                self.minMass = np.min(self.data['mass'])
+                self.maxMass = np.max(self.data['mass'])
+                self.maxCompactness = np.max(self.data['compactness'])
+                self.minCompactness = np.min(self.data['compactness'])
+
+            # whiten data
+            self.var_mass = np.std(self.data['mass'])
+            self.var_compactness = np.std(self.data['compactness'])
+
+            self.maxCompactness /= self.var_compactness
+            self.minCompactness /= self.var_compactness
+            self.yhigh = 0.2/self.var_compactness  # For reflection boundary condition
+
+            self.margPostData = np.vstack((self.data['mass']/self.var_mass,
+                                           self.data['compactness']/self.var_compactness)).T
+
         self.m_min=0.8
-        # store useful parameters
-        self.mc_mean = np.mean(self.data['mc_source'])
-
-        # whiten data
-        self.var_LambdaT = np.std(self.data['lambdat'])
-        self.var_q = np.std(self.data['q'])
-
-        self.q_max /= self.var_q
-        self.q_min /= self.var_q
-        self.yhigh = 1.0/self.var_q  # For reflection boundary condition
-
-        self.margPostData = np.vstack((self.data['lambdat']/self.var_LambdaT,
-                                       self.data['q']/self.var_q)).T
         self.bw = len(self.margPostData)**(-1/6.)  # Scott's bandwidth factor
 
         # Compute the KDE for the marginalized posterior distribution #
@@ -279,15 +374,17 @@ class Model_selection:
                                   ylow=None,
                                   yhigh=self.yhigh)
 
+        self.useEM = useEM
         # Attribute that distinguishes parametrization method
         self.spectral = spectral
 
     def getEoSInterp(self, eosname=None, m_min=1.0, N=100):
         '''
         This method accepts one of the NS native equations of state
-        and uses that to return a list [s, mass, Λ, max_mass] where
+        and uses that to return a list [s, s_EM, mass, Λ, max_mass] where
         s is the interpolation function for the mass and the tidal
-        deformability.
+        deformability and s_EM is the interpolation function for the mass 
+        and the compactness.
 
         eosname     :: Equation of state native to LALsuite
 
@@ -325,6 +422,7 @@ class Model_selection:
         masses = masses[masses <= max_mass]
         Lambdas = []
         gravMass = []
+        compactness = []
         for m in masses:
             try:
                 rr = lalsim.SimNeutronStarRadius(m*lal.MSUN_SI, fam)
@@ -332,13 +430,14 @@ class Model_selection:
                 cc = m*lal.MRSUN_SI/rr
                 Lambdas = np.append(Lambdas, (2/3)*kk/(cc**5))
                 gravMass = np.append(gravMass, m)
+                compactness = np.append(compactness, cc)
             except RuntimeError:
                 break
         Lambdas = np.array(Lambdas)
         gravMass = np.array(gravMass)
         s = interp1d(gravMass, Lambdas)
-
-        return [s, gravMass, Lambdas, max_mass]
+        s_EM = interp1d(gravMass, compactness)
+        return [s, s_EM, gravMass, Lambdas, max_mass]
 
     def getEoSInterpFromMLambdaFile(self, tidalFile):
         '''
@@ -367,6 +466,32 @@ class Model_selection:
         max_mass = np.max(masses)
         return [s, masses, Lambdas, max_mass]
 
+    def getEoSInterpFromMcompactnessFile(self, compactnessFile):
+        '''
+        This method accepts the data from a file that have the
+        compactness information in the following format:
+
+        #mass    	c
+
+        ...	    	...
+
+        ...		    ...
+
+        max_mass	...
+
+        The values of masses should be in units of solar masses. The
+        compactness c should be supplied in SI unit.
+
+        The method computes the dimensionless tidal deformabiliy Λ and
+        returns a list [s_EM, mass, c, max_mass] where s_EM is the interpolation
+        function for the mass and the compactness.
+        '''
+        masses, compactness = np.loadtxt(compactnessFile, unpack=True)
+        # self.minMass = np.min(masses)
+        s_EM = interp1d(masses, compactness)
+        max_mass = np.max(masses)
+        return [s_EM, masses, compactness, max_mass]
+
     def getEoSInterpFromMRFile(self, MRFile):
         '''
         This method accepts the data from a file that have the
@@ -376,30 +501,35 @@ class Model_selection:
 
         ...	    	...          ...
 
-        ...		...          ...
+        ...		    ...          ...
 
         max_mass	...          ...
 
         The values of masses should be in units of solar masses. The
-        tidal deformability radius should be supplied in meters.
+        radius should be supplied in meters.
 
-        The method computes the dimensionless tidal deformabiliy Λ and
-        returns a list [s, mass, Λ, max_mass] where s is the interpolation
-        function for the mass and the tidal deformability.
+        The method computes the dimensionless tidal deformabiliy Λ and 
+        compactness c, and returns a list [s, s_EM, mass, Λ, max_mass] where s is 
+        the interpolation function for the mass and the tidal deformability and 
+        where s_EM is the interpolation function for the mass and the 
+        compactness.
         '''
         masses, radius, kappa = np.loadtxt(MRFile, unpack=True)
         # self.minMass = np.min(masses)
         compactness = masses*lal.MRSUN_SI/radius
         Lambdas = (2/3)*kappa/(compactness**5)
         s = interp1d(masses, Lambdas)
+        s_EM = interp1d(gravMass, compactness)
         max_mass = np.max(masses)
-        return [s, masses, Lambdas, max_mass]
+        return [s, s_EM, masses, Lambdas, max_mass]
 
     def getEoSInterp_parametrized(self, params, N=100,m_min=0.8):
         '''
         This method accepts a four parameter description of the neutron star 
-        equation of state, and returns a list [s, m_min, max_mass] where s is 
-        the interpolation function for the mass and the tidal deformability.
+        equation of state, and returns a list [s, s_EM, m_min, max_mass] where s 
+        is the interpolation function for the mass and the tidal deformability 
+        and where s_EM is the interpolation function for the mass and the 
+        compactness.
 
         params      :: Four parameter list.
 
@@ -427,6 +557,7 @@ class Model_selection:
         masses = masses[masses <= max_mass]
         Lambdas = []
         gravMass = []
+        compactness = []
         for m in masses:
             try:
                 rr = lalsim.SimNeutronStarRadius(m*lal.MSUN_SI, fam)
@@ -439,8 +570,8 @@ class Model_selection:
         Lambdas = np.array(Lambdas)
         gravMass = np.array(gravMass)
         s = interp1d(gravMass, Lambdas)
-        
-        return([s, gravMass, max_mass,max(m_min,min_mass)])
+        s_EM = interp1d(gravMass, compactness)
+        return([s, s_EM, gravMass, max_mass,max(m_min,min_mass)])
 
     def computeEvidenceRatio(self, EoS1, EoS2, gridN=1000, save=None, 
                              trials=0, verbose=False):
@@ -469,14 +600,14 @@ class Model_selection:
         min_mass1,min_mass2 = 0.,0.
 
         if type(EoS1) == list:
-            [s1, _,
+            [s1, s1_EM, _,
              max_mass_eos1,min_mass1] = self.getEoSInterp_parametrized(EoS1, N=1000)
 
         elif os.path.exists(EoS1):
             if verbose:
                 print('Trying m-R-k file to compute EoS interpolant')
             try:
-                [s1, _, _,
+                [s1, s1_EM, _, _,
                  max_mass_eos1] = self.getEoSInterpFromMRFile(EoS1)
             except ValueError:
                 if verbose:
@@ -484,19 +615,19 @@ class Model_selection:
                 [s1, _, _,
                  max_mass_eos1] = self.getEoSInterpFromMLambdaFile(EoS1)
         else:
-            [s1, _, _,
+            [s1, s1_EM, _, _,
              max_mass_eos1] = self.getEoSInterp(eosname=EoS1,
                                                 m_min=self.minMass)
 
         if type(EoS2) == list:
-            [s2, _,
+            [s2, s2_EM, _,
              max_mass_eos2,min_mass2] = self.getEoSInterp_parametrized(EoS2, N=1000)
 
         elif os.path.exists(EoS2):
             if verbose:
                 print('Trying m-R-k file to compute EoS interpolant')
             try:
-                [s2, _, _,
+                [s2, s2_EM, _, _,
                  max_mass_eos2] = self.getEoSInterpFromMRFile(EoS2)
             except ValueError:
                 if verbose:
@@ -504,26 +635,39 @@ class Model_selection:
                 [s2, _, _,
                  max_mass_eos2] = self.getEoSInterpFromMLambdaFile(EoS2)
         else:
-            [s2, _, _,
+            [s2, s2_EM, _, _,
              max_mass_eos2] = self.getEoSInterp(eosname=EoS2,
                                                 m_min=self.minMass)
 
-        # compute support
-        [lambdat_eos1,
-         q_eos1, support2D1] = integrator(self.q_min, self.q_max, self.mc_mean,
-                                          s1, max_mass_eos1, self.kde,
-                                          gridN=gridN,
-                                          var_LambdaT=self.var_LambdaT,
-                                          var_q=self.var_q,
-                                          minMass=max(self.minMass,min_mass1))
+        if self.useEM==False:
+            # compute support
+            [lambdat_eos1,
+             q_eos1, support2D1] = integrator(self.q_min, self.q_max, self.mc_mean,
+                                              s1, max_mass_eos1, self.kde,
+                                              gridN=gridN,
+                                              var_LambdaT=self.var_LambdaT,
+                                              var_q=self.var_q,
+                                              minMass=max(self.minMass,min_mass1))
 
-        [lambdat_eos2,
-         q_eos2, support2D2] = integrator(self.q_min, self.q_max, self.mc_mean,
-                                          s2, max_mass_eos2, self.kde,
-                                          gridN=gridN,
-                                          var_LambdaT=self.var_LambdaT,
-                                          var_q=self.var_q,
-                                          minMass=max(self.minMass,min_mass2))
+            [lambdat_eos2,
+             q_eos2, support2D2] = integrator(self.q_min, self.q_max, self.mc_mean,
+                                              s2, max_mass_eos2, self.kde,
+                                              gridN=gridN,
+                                              var_LambdaT=self.var_LambdaT,
+                                              var_q=self.var_q,
+                                              minMass=max(self.minMass,min_mass2))
+
+        else:
+            # compute support
+            [mass_eos1, 
+             compactness_eos1, support2D1] = integratorEM(s1, max_mass_eos1, 
+                                                          self.kde, gridN=gridN,
+                                                          minMass=max(self.minMass,min_mass1))
+
+            [mass_eos2, 
+             compactness_eos2, support2D2] = integratorEM(s2, max_mass_eos2, 
+                                                          self.kde, gridN=gridN,
+                                                          minMass=max(self.minMass,min_mass2))
 
         # iterate to determine uncertainty via re-drawing from
         # smoothed distribution
@@ -554,13 +698,22 @@ class Model_selection:
 
         futures = []
         for ii, this_trials, in zip(range(workers), trials_per_worker):
-            future_dict = {"margPostData": self.margPostData, "kde": self.kde,
-                           "yhigh": self.yhigh, "bw": self.bw, "q_min": self.q_min,
-                           "q_max": self.q_max, "mc_mean": self.mc_mean, "s1": s1,
-                           "s2": s2, "max_mass_eos1": max_mass_eos1,
-                           "max_mass_eos2": max_mass_eos2, "gridN": gridN,
-                           "var_LambdaT": self.var_LambdaT, "var_q": self.var_q,
-                           "minMass": self.minMass, 'trials': this_trials}
+            if self.useEM == False:
+                future_dict = {"margPostData": self.margPostData, "kde": self.kde,
+                               "yhigh": self.yhigh, "bw": self.bw, "q_min": self.q_min,
+                               "q_max": self.q_max, "mc_mean": self.mc_mean, "s1": s1,
+                               "s2": s2, "max_mass_eos1": max_mass_eos1,
+                               "max_mass_eos2": max_mass_eos2, "gridN": gridN,
+                               "var_LambdaT": self.var_LambdaT, "var_q": self.var_q,
+                               "minMass": self.minMass, 'trials': this_trials}
+
+            else:
+                future_dict = {"margPostData": self.margPostData, "kde": self.kde,
+                               "yhigh": self.yhigh, "bw": self.bw,  "s1": s1,
+                               "s2": s2, "max_mass_eos1": max_mass_eos1,
+                               "max_mass_eos2": max_mass_eos2, "gridN": gridN,
+                               "minMass": self.minMass, 'trials': this_trials}
+
             futures.append(get_trials.remote(future_dict))
             if verbose:
                 print("Submitted task in core: {}".format(ii+1))
@@ -596,18 +749,24 @@ class Model_selection:
         '''
 
         # generate interpolator for eos
-        [s, _,
+        [s, s_EM_,
          max_mass_eos,min_mass] = self.getEoSInterp_parametrized(params, N=100, m_min=self.m_min)
 
         # compute support
-        [lambdat_eos,
-         q_eos, support2D] = integrator(self.q_min, self.q_max, self.mc_mean,
-                                        s, max_mass_eos, self.kde,
-                                        gridN=gridN,
-                                        var_LambdaT=self.var_LambdaT,
-                                        var_q=self.var_q,
-                                        minMass=min_mass)
+        if self.useEM==False:
+            [lambdat_eos,
+             q_eos, support2D] = integrator(self.q_min, self.q_max, self.mc_mean,
+                                            s, max_mass_eos, self.kde,
+                                            gridN=gridN,
+                                            var_LambdaT=self.var_LambdaT,
+                                            var_q=self.var_q,
+                                            minMass=min_mass)
 
+        else:
+            [mass_eos,
+             compactness_eos, support2D] = integratorEM(s_EM, max_mass_eos, 
+                                                        self.kde, gridN=gridN, 
+                                                        minMass=min_mass)
         return(support2D)
 
     def plot_func(self, eos_list, gridN=1000, filename='posterior_support.pdf',
@@ -620,11 +779,12 @@ class Model_selection:
 
         eos_list :: A list of equation state models. The members of
                     list could be either one of the named equation of
-                    state in LALSimulation, or text files with columns
+                    state in LALSimulation, text files with columns
                     giving the mass and tidal deformability information,
-                    or text files with columns giving mass, radius and
-                    tidal Love number. The method also accepts a string
-                    if the user wishes to plot a single equation of state.
+                    or columns giving the mass and compactness information,
+                    or columns giving mass, radius and tidal Love number. 
+                    The method also accepts a string if the user wishes to 
+                    plot a single equation of state.
 
         gridN :: # of grid pts used for plotting EOS curves. (Default: 1000)
         filename :: Name of the output file in the which the plot will be
@@ -641,54 +801,75 @@ class Model_selection:
         pl.rcParams.update({'font.size': 18})
         pl.figure(figsize=(15, 10))
 
-        lambdat_grid = np.linspace(0, np.max(self.data['lambdat']), 100)
-        q_grid = np.linspace(np.min(self.data['q']), 1.0, 100)
-        L_GRID, Q_GRID = np.meshgrid(lambdat_grid, q_grid)
-        grid2D = np.array([L_GRID, Q_GRID]).T
+        if self.useEM==False:
+            x_min, x_max = 0, np.max(self.data['lambdat'])
+            y_min, y_max = np.min(self.data['q']), 1.0
+            x_label = 'lambdat'
+            x_plotLabel = '$\\tilde{\\Lambda}$'
+            y_label = 'q'
+            y_plotLabel = '$q$'
+
+            q_min = y_min*self.var_q
+            q_max = y_max*self.var_q
+            mc = np.mean(self.data['mc_source'])
+            if full_mc_dist:
+                mc_low = np.min(self.data['mc_source'])
+                mc_hi = np.max(self.data['mc_source'])
+
+            q = np.linspace(q_min, q_max, gridN)
+            m1, m2 = getMasses(q, mc)
+            if full_mc_dist:
+                m1_low, m2_low = getMasses(q, mc_low)
+                m1_low, m2_low, y_low = apply_mass_constraint(m1_low, m2_low,
+                                                              q, self.minMass)
+                m1_hi, m2_hi = getMasses(q, mc_hi)
+                m1_hi, m2_hi, y_max = apply_mass_constraint(m1_hi, m2_hi,
+                                                                q, self.minMass)
+                y_fill = np.intersect1d(y_low, y_max)
+                m1_hi = m1_hi[np.in1d(y_max, y_fill)]
+                m2_hi = m2_hi[np.in1d(y_max, y_fill)]
+                m1_low = m1_low[np.in1d(y_low, y_fill)]
+                m2_low = m2_low[np.in1d(y_low, y_fill)]
+            m1, m2, q = apply_mass_constraint(m1, m2, q, self.minMass)
+
+        else:
+            x_min, x_max = np.min(self.data['mass']), np.max(self.data['mass'])
+            y_min, y_max = np.min(self.data['compactness']), np.min(self.data['compactness'])
+            x_label = 'mass'
+            x_plotLabel = '$M_{\odot}$'
+            y_label = 'compactness'
+            y_plotLabel = '$c$'
+
+            mass = np.linspace(x_min, x_max, gridN)
+
+            if full_mc_dist:
+                y_fill = np.intersect1d(y_low, y_max)
+        
+        x_grid = np.linspace(x_min, x_max, 100)
+        y_grid = np.linspace(y_min, y_max, 100)
+        x_GRID, y_GRID = np.meshgrid(x_grid, y_grid)
+        grid2D = np.array([x_GRID, y_GRID]).T
         a, b, c = np.shape(grid2D)
         grid2D_reshaped = grid2D.reshape(a*b, c)
-        sample_data = np.vstack((self.data['lambdat'], self.data['q'])).T
+        sample_data = np.vstack((self.data[x_label], self.data[y_label])).T
         kde = Bounded_2d_kde(sample_data, xlow=0.0, xhigh=None, ylow=0.0,
                              yhigh=1.0, bw=self.bw)
 
         support2Dgrid = kde.evaluate(grid2D_reshaped)
 
-        support2D_matrix = support2Dgrid.reshape(len(lambdat_grid),
-                                                 len(q_grid))
-        pl.pcolormesh(L_GRID, Q_GRID, support2D_matrix.T, shading='auto')
+        support2D_matrix = support2Dgrid.reshape(len(x_grid),
+                                                 len(y_grid))
+        pl.pcolormesh(x_GRID, y_GRID, support2D_matrix.T, shading='auto')
         pl.colorbar()
-        pl.scatter(self.data['lambdat'], self.data['q'], marker='.', c='k',
+        pl.scatter(self.data[x_label], self.data[y_label], marker='.', c='k',
                    s=1, alpha=0.1)
-
-        q_min = self.q_min*self.var_q
-        q_max = self.q_max*self.var_q
-        mc = np.mean(self.data['mc_source'])
-        if full_mc_dist:
-            mc_low = np.min(self.data['mc_source'])
-            mc_hi = np.max(self.data['mc_source'])
-
-        q = np.linspace(q_min, q_max, gridN)
-        m1, m2 = getMasses(q, mc)
-        if full_mc_dist:
-            m1_low, m2_low = getMasses(q, mc_low)
-            m1_low, m2_low, q_low = apply_mass_constraint(m1_low, m2_low,
-                                                          q, self.minMass)
-            m1_hi, m2_hi = getMasses(q, mc_hi)
-            m1_hi, m2_hi, q_hi = apply_mass_constraint(m1_hi, m2_hi,
-                                                            q, self.minMass)
-            q_fill = np.intersect1d(q_low, q_hi)
-            m1_hi = m1_hi[np.in1d(q_hi, q_fill)]
-            m2_hi = m2_hi[np.in1d(q_hi, q_fill)]
-            m1_low = m1_low[np.in1d(q_low, q_fill)]
-            m2_low = m2_low[np.in1d(q_low, q_fill)]
-        m1, m2, q = apply_mass_constraint(m1, m2, q, self.minMass)
 
         assert (type(eos_list) == str or type(eos_list) == list)
         if type(eos_list) == str:
             eos_list = [eos_list]
         for eos in eos_list:
             if type(eos) == list:
-                [s, _,
+                [s, s_EM, _,
                  max_mass_eos,min_mass] = self.getEoSInterp_parametrized(eos, N=1000)
 
                 # Reducing the text in the figure legend
@@ -697,37 +878,45 @@ class Model_selection:
             elif os.path.exists(eos):
                 print('Trying m-R-k file to compute EoS interpolant')
                 try:
-                    [s, _, _,
+                    [s, s_EM, _, _,
                      max_mass_eos] = self.getEoSInterpFromMRFile(eos)
                 except ValueError:
                     print('Trying m-λ file to compute EoS interpolant')
-                    [s, _, _,
+                    [s, s_EM, _, _,
                      max_mass_eos] = self.getEoSInterpFromMLambdaFile(eos)
             else:
-                [s, _, _,
+                [s, s_EM, _, _,
                  max_mass_eos] = self.getEoSInterp(eosname=eos,
                                                    m_min=self.minMass)
 
-            LambdaT = get_LambdaT_for_eos(m1, m2, max_mass_eos, s)
-            if full_mc_dist:
-                LambdaT_low = get_LambdaT_for_eos(m1_low, m2_low,
-                                                  max_mass_eos, s)
-                LambdaT_hi = get_LambdaT_for_eos(m1_hi, m2_hi, max_mass_eos, s)
+            if self.useEM==False:
+                xx = get_LambdaT_for_eos(m1, m2, max_mass_eos, s)
+                yy = q
+                if full_mc_dist:
+                    x_low = get_LambdaT_for_eos(m1_low, m2_low,
+                                                      max_mass_eos, s)
+                    x_hi = get_LambdaT_for_eos(m1_hi, m2_hi, max_mass_eos, s)
+            else:
+                xx = mass
+                yy = get_compactness_for_eos(mass, s_EM)
+                if full_mc_dist:
+                    y_low = get_compactness_for_eos(mass, s_EM)
+                    y_hi = get_compactness_for_eos(mass, s_EM)
 
             if full_mc_dist:
-                p = pl.plot(LambdaT, q, linewidth=1, label=eos)
+                p = pl.plot(xx, yy, linewidth=1, label=eos)
             else:
-                p = pl.plot(LambdaT, q, linewidth=3, label=eos)
+                p = pl.plot(xx, yy, linewidth=3, label=eos)
             color = p[0].get_color()
             if full_mc_dist:
-                pl.fill_betweenx(q_fill, LambdaT_low, LambdaT_hi,
+                pl.fill_betweenx(y_fill, x_low, x_max,
                                  facecolor=color, alpha=0.5)
-            pl.xlabel('$\\tilde{\\Lambda}$')
-            pl.ylabel('$q$')
-            pl.xlim([np.min(self.data['lambdat']),
-                     np.max(self.data['lambdat'])])
-            pl.ylim([np.min(self.data['q']),
-                     np.max(self.data['q'])])
+            pl.xlabel(x_plotLabel)
+            pl.ylabel(y_plotLabel)
+            pl.xlim([np.min(self.data[x_label]),
+                     np.max(self.data[x_label])])
+            pl.ylim([np.min(self.data[y_label]),
+                     np.max(self.data[y_label])])
             pl.legend()
 
         if usetitle:
@@ -735,9 +924,10 @@ class Model_selection:
             pl.title('EoS = {}'.format(text))
         pl.savefig(filename, bbox_inches='tight')
 
-
+# WOP WOP WOP WOP WOP WOP
 class Stacking():
-    def __init__(self, event_list, event_priors=None, labels=None,spectral=False,Ns=None):
+    def __init__(self, event_list, event_priors=None, labels=None,
+                 spectral=False,Ns=None,useEM=False):
         '''
         This class takes as input a list of posterior-samples files for
         various events. Optionally, prior samples files can also be
@@ -745,6 +935,21 @@ class Stacking():
         to each of the posterior samples. Ns is the Number of samples to which the single event q and 
         lambda_tilde posteriors are downsampled and is only required for speeding up the parametric eos
         analysis
+
+        event_list    :: The full paths to the posterior samples files of GW
+                         source files and/or EM source files. Examples given:
+
+                         If 1D list is provided:
+                         ["GW_post1.dat","GW_post2.dat"]
+                         or if useEM=True,
+                         ["EM_post1.txt","EM_post2.txt"]
+                         
+                         If 2D list of names is provided:
+                         [["GW_post1.dat","GW_post2.dat"],["EM_post1.txt","EM_post2.txt"]]
+        
+        useEM         :: If set True, the electromagnetic sourced compactness - 
+                         mass posterior file supplied will be used to compute the
+                         EoS' evidence.
         '''
         if type(event_list) != list:  # event_list must be a list
             print('All arguments for Stacking must be a list of file-names')
