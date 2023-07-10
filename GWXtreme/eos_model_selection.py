@@ -166,7 +166,7 @@ def integratorEM(eosfunc, max_mass_eos, postfunc, gridN=1000, minMass=0.1):
     f = postfunc.evaluate(np.vstack((mass, compactness)).T)
     f_centers = 0.5*(f[1:] + f[:-1])
     int_element = f_centers * dm
-    return [mass, compactness, np.sum(int_element)]
+    return [mass, compactness, np.log(np.sum(int_element))]
 
 
 def apply_mass_constraint(m1, m2, q, minMass):
@@ -831,6 +831,8 @@ class Model_selection:
                 m1_low = m1_low[np.in1d(y_low, y_fill)]
                 m2_low = m2_low[np.in1d(y_low, y_fill)]
             m1, m2, q = apply_mass_constraint(m1, m2, q, self.minMass)
+            xlow, xhigh = 0.0, None
+            ylow, yhigh = 0.0, 1.0
 
         else:
             x_min, x_max = np.min(self.data['mass']), np.max(self.data['mass'])
@@ -843,7 +845,9 @@ class Model_selection:
             mass = np.linspace(x_min, x_max, gridN)
 
             if full_mc_dist:
-                y_fill = np.intersect1d(y_low, y_max)
+                y_fill = np.intersect1d(y_min, y_max)
+            xlow, xhigh = None, None
+            ylow, yhigh = None, None
         
         x_grid = np.linspace(x_min, x_max, 100)
         y_grid = np.linspace(y_min, y_max, 100)
@@ -852,8 +856,9 @@ class Model_selection:
         a, b, c = np.shape(grid2D)
         grid2D_reshaped = grid2D.reshape(a*b, c)
         sample_data = np.vstack((self.data[x_label], self.data[y_label])).T
-        kde = Bounded_2d_kde(sample_data, xlow=0.0, xhigh=None, ylow=0.0,
-                             yhigh=1.0, bw=self.bw)
+
+        kde = Bounded_2d_kde(sample_data, xlow=xlow, xhigh=xhigh, ylow=ylow,
+                             yhigh=yhigh, bw=self.bw)
 
         support2Dgrid = kde.evaluate(grid2D_reshaped)
 
@@ -897,6 +902,7 @@ class Model_selection:
                                                       max_mass_eos, s)
                     x_hi = get_LambdaT_for_eos(m1_hi, m2_hi, max_mass_eos, s)
             else:
+                print("line")
                 xx = mass
                 yy = get_compactness_for_eos(mass, s_EM)
                 if full_mc_dist:
@@ -924,7 +930,7 @@ class Model_selection:
             pl.title('EoS = {}'.format(text))
         pl.savefig(filename, bbox_inches='tight')
 
-# WOP WOP WOP WOP WOP WOP
+### WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP WOP
 class Stacking():
     def __init__(self, event_list, event_priors=None, labels=None,
                  spectral=False,Ns=None,useEM=False):
