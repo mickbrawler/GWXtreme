@@ -25,6 +25,7 @@ import multiprocessing
 import ray
 import numpy as np
 from scipy.interpolate import interp1d
+import scipy.stats as st
 
 import lal
 import lalsimulation as lalsim
@@ -53,6 +54,19 @@ def getLambdaT(m1, m2, Lambda1, Lambda2):
     return LambdaTilde
 
 
+def getDLambdaT(m1, m2, Lambda1, Lambda2):
+    '''
+    This function converts the Lambda1, Lambda2, mass1, mass2
+    to delta Lambda tilde.
+    '''
+    sq = (m1*m2)/((m1+m2)**2)
+    DLambdaTilde = .5*(((1-4*sq)**.5)*(1-(13272/1319)*sq+\
+                   (8944/1319)*sq**2)*(Lambda1+Lambda2)+\
+                   (1-(15910/1319)*sq+(32850/1319)*sq**2+\
+                   (3380/1319)*sq**3)*(Lambda1-Lambda2))
+    return DLambdaTilde
+
+
 def get_LambdaT_for_eos(m1, m2, max_mass_eos, eosfunc):
     '''
     This function accepts the masses and an equation of state interpolant
@@ -76,9 +90,33 @@ def get_LambdaT_for_eos(m1, m2, max_mass_eos, eosfunc):
     return LambdaT
 
 
+def get_DLambdaT_for_eos(m1, m2, max_mass_eos, eosfunc):
+    '''
+    This function accepts the masses and an equation of state interpolant
+    with its maximum allowed mass, and return the values of LambdaT.
+    '''
+    kerr_cases_1 = m1 >= max_mass_eos
+    kerr_cases_2 = m2 >= max_mass_eos
+
+    Lambda1 = np.zeros_like(m1)
+    Lambda2 = np.zeros_like(m2)
+
+    # interpolate from known curves to obtain tidal
+    # deformabilities as a function of mass for the
+    # rest of the points
+    Lambda1[~kerr_cases_1] = eosfunc(m1[~kerr_cases_1])
+    Lambda2[~kerr_cases_2] = eosfunc(m2[~kerr_cases_2])
+
+    # compute chirp tidal deformability
+    DLambdaT = getDLambdaT(m1, m2, Lambda1, Lambda2)
+
+    return DLambdaT
+
+
 # The integrator function #
 def integrator(q_min, q_max, mc, eosfunc, max_mass_eos, postfunc,
-               gridN=1000, var_LambdaT=1.0, var_q=1.0, minMass=0.1):
+               priorfunc, gridN=1000, var_DLambdaT=1.0, var_LambdaT=1.0, 
+               var_q=1.0, minMass=0.1):
     '''
     This function numerically integrates the KDE along the
     EoS curve.
@@ -95,7 +133,11 @@ def integrator(q_min, q_max, mc, eosfunc, max_mass_eos, postfunc,
 
     postfunc :: K(Λ, q) KDE of the posterior distr
 
+    priorfunc   :: K(dΛ~, Λ~) KDE of the prior distr
+
     gridN  :: Number of steps for the integration (default=1K)
+
+    var_DLambdaT :: Standard deviation of the DLambdT
 
     var_LambdaT :: Standard deviation of the LambdT
 
@@ -120,17 +162,21 @@ def integrator(q_min, q_max, mc, eosfunc, max_mass_eos, postfunc,
 
     m1, m2, q = apply_mass_constraint(m1, m2, q, minMass)
     LambdaT = get_LambdaT_for_eos(m1, m2, max_mass_eos, eosfunc)
+    DLambdaT = get_DLambdaT_for_eos(m1, m2, max_mass_eos, eosfunc)
 
     # scale things back so they make sense with the KDE
-    LambdaT_scaled, q_scaled = LambdaT/var_LambdaT, q/var_q
+    DLambdaT_scaled, LambdaT_scaled, q_scaled = DLambdaT/var_DLambdaT, LambdaT/var_LambdaT, q/var_q
 
     # perform integration via trapazoidal approximation
     dq = np.diff(q)
     f = postfunc.evaluate(np.vstack((LambdaT_scaled, q_scaled)).T)
+    if type(priorfunc) == type(None): g = 1.0
+    else: g = priorfunc.evaluate(np.vstack((DLambdaT_scaled, LambdaT_scaled)).T)
+    f = f/g
     f_centers = 0.5*(f[1:] + f[:-1])
     int_element = f_centers * dq
 
-    return [LambdaT_scaled, q_scaled, np.sum(int_element)]
+    return [DLambdaT_scaled, LambdaT_scaled, q_scaled, np.sum(int_element)]
 
 def apply_mass_constraint(m1, m2, q, minMass):
     '''
@@ -173,20 +219,45 @@ def get_trials(fd):
                                  yhigh=fd['yhigh'],
                                  bw=fd['bw'])
 
+        if type(fd['PriorData']) != type(None):
+            new_PriorData = np.array([])
+            counter = 0
+            while len(new_PriorData) < len(fd['PriorData']):
+                prune_adjust_factor = 1.1 + counter/10.
+                N_resample = int(len(fd['PriorData'])*prune_adjust_factor)
+                new_PriorData = fd['prior_kde'].resample(size=N_resample).T
+                unphysical = (new_PriorData[:, 0] < fd['xlowP']) +\
+                             (new_PriorData[:, 0] > fd['xhighP']) +\
+                             (new_PriorData[:, 1] < 0)
+                new_PriorData = new_PriorData[~unphysical]
+                counter += 1
+            indices = np.arange(len(new_PriorData))
+            chosen = np.random.choice(indices, len(fd['PriorData']))
+            new_PriorData = new_PriorData[chosen]
+
+            # generate a new prior kde
+            new_prior_kde = Bounded_2d_kde(new_PriorData, xlow=fd['xlowP'],
+                                           xhigh=fd['xhighP'], ylow=0.0,
+                                           yhigh=None, bw=fd['bwP'])
+        else:
+            new_prior_kde = None
+
         # integrate to get support
-        [this_lambdat_eos1, this_q_eos1,
+        [this_dlambdat_eos1, this_lambdat_eos1, this_q_eos1,
          this_support2D1] = integrator(fd['q_min'], fd['q_max'],
                                        fd['mc_mean'], fd['s1'],
                                        fd['max_mass_eos1'], new_kde,
-                                       gridN=fd['gridN'],
+                                       new_prior_kde, gridN=fd['gridN'],
+                                       var_DLambdaT=fd['var_DLambdaT'],
                                        var_LambdaT=fd['var_LambdaT'],
                                        var_q=fd['var_q'],
                                        minMass=fd['minMass'])
-        [this_lambdat_eos2, this_q_eos2,
+        [this_dlambdat_eos2, this_lambdat_eos2, this_q_eos2,
          this_support2D2] = integrator(fd['q_min'], fd['q_max'],
                                        fd['mc_mean'], fd['s2'],
                                        fd['max_mass_eos2'], new_kde,
-                                       gridN=fd['gridN'],
+                                       new_prior_kde, gridN=fd['gridN'],
+                                       var_DLambdaT=fd['var_DLambdaT'],
                                        var_LambdaT=fd['var_LambdaT'],
                                        var_q=fd['var_q'],
                                        minMass=fd['minMass'])
@@ -199,7 +270,7 @@ def get_trials(fd):
 
 
 class Model_selection:
-    def __init__(self, posteriorFile, priorFile=None, spectral=False,Ns=None):
+    def __init__(self, posteriorFile, priorFile=None, UpriorLTs=False, spectral=False, Ns=None):
         '''
         Initiates the Bayes factor calculator with the posterior
         samples from the uniform LambdaT, dLambdaT parameter
@@ -214,6 +285,9 @@ class Model_selection:
                          obtained from the prior file. If this is not
                          supplied, the posterior samples will be used
                          to determine the bounds.
+
+        UpriorLTs     :: If set to False, the prior for dLambdaT, LambdaT 
+                         is not uniform, is calculated, and included in the BF.
 
         spectral      :: Distinguishes between piecewise polytrope and spectral 
                          decomposition method.
@@ -231,6 +305,15 @@ class Model_selection:
                                         np.array(_data['mass_ratio']),
                                         np.array(_data['chirp_mass_source']),
                                         np.array(_data['lambda_tilde']))
+        elif(posteriorFile[-4:]=='json'):
+            with open(posteriorFile,'r') as f:
+                _data = json.load(f)['posterior']['content']
+            (q,mc,LambdaT)=(np.array(_data['mass_ratio']),
+                            np.array(_data['chirp_mass']),
+                            np.array(_data['lambda_tilde']))
+            try: DLambdaT = np.array(_data['delta_lambda_tilde'])
+            except KeyError: DLambdaT = np.array(_data['delta_lambda'])
+            m1, m2 = getMasses(q, mc)
         else:
             _data = np.recfromtxt(posteriorFile, names=True)
             (m1,m2,q,mc,LambdaT)=(np.array(_data['m1_source']),
@@ -238,7 +321,7 @@ class Model_selection:
                                         np.array(_data['q']),
                                         np.array(_data['mc_source']),
                                         np.array(_data['lambdat']))
-        data={'m1_source':m1,'m2_source':m2,'q':q,'mc_source':mc,'lambdat':LambdaT}
+        data={'m1_source':m1,'m2_source':m2,'q':q,'mc_source':mc,'dlambdat':DLambdaT,'lambdat':LambdaT}
         Ns_orig = len(q)
         if(Ns is None or Ns>Ns_orig):
             Ns = Ns_orig #By default we use all the posterior samples without thinning
@@ -262,6 +345,7 @@ class Model_selection:
 
         # whiten data
         self.var_LambdaT = np.std(self.data['lambdat'])
+        self.var_DLambdaT = np.std(self.data['dlambdat'])
         self.var_q = np.std(self.data['q'])
 
         self.q_max /= self.var_q
@@ -278,6 +362,44 @@ class Model_selection:
                                   xhigh=None,
                                   ylow=None,
                                   yhigh=self.yhigh)
+
+        if UpriorLTs == False:
+            with open(posteriorFile,'r') as f:
+                data = json.load(f)['priors']
+
+            MRcont, MCcont, L1cont, L2cont = data['mass_ratio']['kwargs'],\
+                                             data['chirp_mass']['kwargs'],\
+                                             data['lambda_1']['kwargs'],\
+                                             data['lambda_2']['kwargs']
+            
+            MR = np.random.uniform(MRcont['minimum'],MRcont['maximum'],1000)
+            MC = np.random.uniform(MCcont['minimum'],MCcont['maximum'],1000)
+            L1 = np.random.uniform(L1cont['minimum'],L1cont['maximum'],1000)
+            L2 = np.random.uniform(L2cont['minimum'],L2cont['maximum'],1000)
+            M1, M2 = getMasses(MR, MC)
+
+            LT = getLambdaT(M1, M2, L1, L2)
+            DLT = getDLambdaT(M1, M2, L1, L2)
+
+            self.varP_DLT = np.std(DLT)
+            self.varP_LT = np.std(LT)
+            self.xlowP = min(DLT)/self.varP_LT
+            self.xhighP = max(DLT)/self.varP_LT
+
+            self.PriorData = np.vstack((DLT/self.varP_DLT,
+                                        LT/self.varP_LT)).T
+            self.bwP = len(self.PriorData)**(-1/6.)  # Scott's bandwidth factor
+            self.prior_kde = Bounded_2d_kde(self.PriorData,
+                                      xlow=self.xlowP,
+                                      xhigh=self.xhighP,
+                                      ylow=0,
+                                      yhigh=None)
+        else:
+            self.PriorData = None
+            self.xlowP = None
+            self.xhighP = None
+            self.bwP = None
+            self.prior_kde = None
 
         # Attribute that distinguishes parametrization method
         self.spectral = spectral
@@ -509,18 +631,20 @@ class Model_selection:
                                                 m_min=self.minMass)
 
         # compute support
-        [lambdat_eos1,
+        [dlambdat_eos1, lambdat_eos1,
          q_eos1, support2D1] = integrator(self.q_min, self.q_max, self.mc_mean,
-                                          s1, max_mass_eos1, self.kde,
-                                          gridN=gridN,
+                                          s1, max_mass_eos1, self.kde, 
+                                          self.prior_kde, gridN=gridN,
+                                          var_DLambdaT=self.var_DLambdaT,
                                           var_LambdaT=self.var_LambdaT,
                                           var_q=self.var_q,
                                           minMass=max(self.minMass,min_mass1))
 
-        [lambdat_eos2,
+        [dlambdat_eos2, lambdat_eos2,
          q_eos2, support2D2] = integrator(self.q_min, self.q_max, self.mc_mean,
                                           s2, max_mass_eos2, self.kde,
-                                          gridN=gridN,
+                                          self.prior_kde, gridN=gridN,
+                                          var_DLambdaT=self.var_DLambdaT,
                                           var_LambdaT=self.var_LambdaT,
                                           var_q=self.var_q,
                                           minMass=max(self.minMass,min_mass2))
@@ -554,13 +678,15 @@ class Model_selection:
 
         futures = []
         for ii, this_trials, in zip(range(workers), trials_per_worker):
-            future_dict = {"margPostData": self.margPostData, "kde": self.kde,
-                           "yhigh": self.yhigh, "bw": self.bw, "q_min": self.q_min,
+            future_dict = {"margPostData": self.margPostData, "PriorData": self.PriorData, 
+                           "kde": self.kde, "prior_kde": self.prior_kde,
+                           "yhigh": self.yhigh, "xlowP": self.xlowP, "xhighP": self.xhighP, 
+                           "bw": self.bw, "bwP": self.bwP, "q_min": self.q_min,
                            "q_max": self.q_max, "mc_mean": self.mc_mean, "s1": s1,
                            "s2": s2, "max_mass_eos1": max_mass_eos1,
-                           "max_mass_eos2": max_mass_eos2, "gridN": gridN,
-                           "var_LambdaT": self.var_LambdaT, "var_q": self.var_q,
-                           "minMass": self.minMass, 'trials': this_trials}
+                           "max_mass_eos2": max_mass_eos2, "gridN": gridN, 
+                           "var_DLambdaT": self.var_DLambdaT, "var_LambdaT": self.var_LambdaT, 
+                           "var_q": self.var_q, "minMass": self.minMass, 'trials': this_trials}
             futures.append(get_trials.remote(future_dict))
             if verbose:
                 print("Submitted task in core: {}".format(ii+1))
@@ -600,10 +726,11 @@ class Model_selection:
          max_mass_eos,min_mass] = self.getEoSInterp_parametrized(params, N=100, m_min=self.m_min)
 
         # compute support
-        [lambdat_eos,
+        [dlambdat_eos, lambdat_eos,
          q_eos, support2D] = integrator(self.q_min, self.q_max, self.mc_mean,
                                         s, max_mass_eos, self.kde,
-                                        gridN=gridN,
+                                        self.prior_kde, gridN=gridN,
+                                        var_DLambdaT=self.var_DLambdaT,
                                         var_LambdaT=self.var_LambdaT,
                                         var_q=self.var_q,
                                         minMass=min_mass)
