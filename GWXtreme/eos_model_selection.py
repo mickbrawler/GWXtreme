@@ -172,23 +172,16 @@ def integrator(q_min, q_max, mc, eosfunc, max_mass_eos,
     # perform integration via trapazoidal approximation
     dq = np.diff(q)
     f = postfunc.evaluate(np.vstack((LambdaT_scaled, q_scaled)).T)
-    f_centers = 0.5*(f[1:] + f[:-1])
-    f_int_element = f_centers * dq
 
-    if type(priorfunc) == type(None): 
-        LT_scaledP = None
-        DLT_scaledP = None
-        g_int_element = 1.0
-        gContribution = [1]
+    if type(priorfunc) == type(None): gContribution = [1]
     else: 
         LT_scaledP, DLT_scaledP = LambdaT/varP_LT, DLambdaT/varP_DLT
-        dDLT = np.diff(DLambdaT)
         g = priorfunc.evaluate(np.vstack((LT_scaledP, DLT_scaledP)).T)
-        g_centers = 0.5*(g[1:] + g[:-1])
-        g_int_element = g_centers * dDLT
-        gContribution = g_int_element
+        f = f / g
+        gContribution = g
 
-    int_element = f_int_element / g_int_element
+    f_centers = 0.5*(f[1:] + f[:-1])
+    int_element = f_centers * dq
 
     return [LambdaT_scaled, q_scaled, np.sum(int_element), np.sum(gContribution)]
 
@@ -240,9 +233,9 @@ def get_trials(fd):
                 prune_adjust_factor = 1.1 + counter/10.
                 N_resample = int(len(fd['PriorData'])*prune_adjust_factor)
                 new_PriorData = fd['prior_kde'].resample(size=N_resample).T
-                unphysical = (new_PriorData[:, 0] < fd['xlowP']) +\
-                             (new_PriorData[:, 0] > fd['xhighP']) +\
-                             (new_PriorData[:, 1] < 0)
+                unphysical = (new_PriorData[:, 0] < 0) +\
+                             (new_PriorData[:, 1] > fd['yhighP']) +\
+                             (new_PriorData[:, 1] < fd['ylowP'])
                 new_PriorData = new_PriorData[~unphysical]
                 counter += 1
             indices = np.arange(len(new_PriorData))
@@ -250,9 +243,9 @@ def get_trials(fd):
             new_PriorData = new_PriorData[chosen]
 
             # generate a new prior kde
-            new_prior_kde = Bounded_2d_kde(new_PriorData, xlow=fd['xlowP'],
-                                           xhigh=fd['xhighP'], ylow=0.0,
-                                           yhigh=None, bw=fd['bwP'])
+            new_prior_kde = Bounded_2d_kde(new_PriorData, xlow=0.0,
+                                           xhigh=None, ylow=fd['ylowP'],
+                                           yhigh=fd['yhighP'], bw=fd['bwP'])
         else:
             new_prior_kde = None
 
@@ -290,7 +283,7 @@ def get_trials(fd):
 
 
 class Model_selection:
-    def __init__(self, posteriorFile, priorFile=None, UpriorLTs=True, spectral=False, Ns=None):
+    def __init__(self, posteriorFile, priorFile=None, UpriorLTs=True, spectral=False, Ns=None, sideGrids=100):
         '''
         Initiates the Bayes factor calculator with the posterior
         samples from the uniform LambdaT, dLambdaT parameter
@@ -306,7 +299,7 @@ class Model_selection:
                          supplied, the posterior samples will be used
                          to determine the bounds.
 
-        UpriorLTs     :: If fed a path, the prior for dLambdaT, LambdaT 
+        UpriorLTs     :: If set to False, the prior for dLambdaT, LambdaT 
                          is not uniform, is then included in the BF calculation.
 
         spectral      :: Distinguishes between piecewise polytrope and spectral 
@@ -315,6 +308,7 @@ class Model_selection:
         Ns            :: Number of Samples to be used for KDE. (Using all samples 
                          from PE will make it very slow)
                          
+        sideGrids     :: Number of grids per side of parameter space.
         '''
         if(posteriorFile[-2:]=='h5'):
             f=h5py.File(posteriorFile,'r')
@@ -382,54 +376,74 @@ class Model_selection:
                                   ylow=None,
                                   yhigh=self.yhigh)
 
-        # We need a normalization value to make our supports probabilities again
-        #normVal_qArray = self.data['q']/self.var_q
-        #normVal_LTArray = self.data['lambdat']/self.var_LambdaT
-        #pairs = np.vstack([normVal_qArray,normVal_LTArray])
-        #kernel = st.gaussian_kde(pairs)
-        #sideGrids = 10000
-        #q_coords, LT_coords = np.linspace(min(normVal_qArray),max(normVal_qArray),sideGrids),
-        #                      np.linspace(min(normVal_LTArray),max(normVal_LTArray), sideGrids)
-        #q_Centers, LT_Centers = np.meshgrid(q_coords, LT_coords)
-        #q_side = (max(normVal_qArray) - min(normVal_qArray)) / sideGrids
-        #LT_side = (max(normVal_LTArray) - min(normVal_LTArray)) / sideGrids
-        #gridArea = q_side * LT_side
-        #totArea = (max(normVal_qArray) - min(normVal_qArray)) * (max(normVal_LTArray) - min(normVal_LTArray))
-        #positions = np.vstack([q_centers.ravel(), LT_centers.ravel()])
-        #product = np.sum(kernel(positions)) * gridArea
+#        # We need a normalization value to make our supports probabilities again
+#        normVal_qArray = self.data['q']/self.var_q
+#        normVal_LTArray = self.data['lambdat']/self.var_LambdaT
+#        pairs = np.vstack([normVal_qArray,normVal_LTArray])
+#        kernel = st.gaussian_kde(pairs)
+#        q_coords, LT_coords = np.linspace(min(normVal_qArray),max(normVal_qArray),sideGrids), \
+#                              np.linspace(min(normVal_LTArray),max(normVal_LTArray), sideGrids)
+#        q_centers = 0.5*(q_coords[1:] + q_coords[:-1])
+#        LT_centers = 0.5*(LT_coords[1:] + LT_coords[:-1])
+#        q_Centers, LT_Centers = np.meshgrid(q_centers, LT_centers)
+#        q_side = (max(normVal_qArray) - min(normVal_qArray)) / sideGrids
+#        LT_side = (max(normVal_LTArray) - min(normVal_LTArray)) / sideGrids
+#        gridArea = q_side * LT_side
+#        totArea = (max(normVal_qArray) - min(normVal_qArray)) * (max(normVal_LTArray) - min(normVal_LTArray))
+#        positions = np.vstack([q_Centers.ravel(), LT_Centers.ravel()])
+#        product = np.sum(kernel(positions)) * gridArea
+#        print(product)
 
-        if type(UpriorLTs) == str:
-            
-            with open(posteriorFile,'r') as f:
-                Pdata = json.load(f)['priors']
+        if UpriorLTs != True:
 
-            m2 = np.random.normal(1.33,0.09,1000)
-            m1 = np.random.normal(1.33,0.09,1000)
-            M2 = []
-            M1 = []
-            for index in range(len(m2)):
-                mass2 = m2[index]
-                mass1 = m1[index]
+            if UpriorLTs == False:
+                
+                # MOCK PRIOR
+                with open(posteriorFile,'r') as f:
+                    Pdata = json.load(f)['priors']
+    
+                m2 = np.random.normal(1.33,0.09,1000)
+                m1 = np.random.normal(1.33,0.09,1000)
+                M2 = []
+                M1 = []
+                for index in range(len(m2)):
+                    mass2 = m2[index]
+                    mass1 = m1[index]
+    
+                    confirmed_mass2 = mass2
+                    confirmed_mass1 = mass1
+                    if mass2 > mass1:
+                        confirmed_mass2 = mass1
+                        confirmed_mass1 = mass2
+    
+                    M2.append(confirmed_mass2)
+                    M1.append(confirmed_mass1)
+                M2 = np.array(M2)
+                M1 = np.array(M1)
+    
+                L1, L2 = np.random.normal(Pdata['lambda_1']['kwargs']['minimum'],Pdata['lambda_1']['kwargs']['maximum'],1000),\
+                         np.random.normal(Pdata['lambda_2']['kwargs']['minimum'],Pdata['lambda_2']['kwargs']['maximum'],1000)
 
-                confirmed_mass2 = mass2
-                confirmed_mass1 = mass1
-                if mass2 > mass1:
-                    confirmed_mass2 = mass1
-                    confirmed_mass1 = mass2
+                LT = getLambdaT(M1, M2, L1, L2)
+                DLT = getDLambdaT(M1, M2, L1, L2)
 
-                M2.append(confirmed_mass2)
-                M1.append(confirmed_mass1)
-            M2 = np.array(M2)
-            M1 = np.array(M1)
+            elif type(UpriorLTs) == str:
 
-            L1, L2 = np.random.normal(Pdata['lambda_1']['kwargs']['minimum'],Pdata['lambda_1']['kwargs']['maximum'],1000),\
-                     np.random.normal(Pdata['lambda_2']['kwargs']['minimum'],Pdata['lambda_2']['kwargs']['maximum'],1000)
-
-            LT = getLambdaT(M1, M2, L1, L2)
-            DLT = getDLambdaT(M1, M2, L1, L2)
+                # BILBY PRIOR
+                with open(posteriorFile,'r') as f:
+                    Pdata = json.load(f)['posterior']['content']
+                (Q,MC,LT)=(np.array(Pdata['mass_ratio']),
+                                np.array(Pdata['chirp_mass']),
+                                np.array(Pdata['lambda_tilde']))
+                try: DLT = np.array(Pdata['delta_lambda_tilde'])
+                except KeyError: DLT = np.array(_data['delta_lambda'])
+                M1, M2 = getMasses(Q, MC)
 
             self.varP_LT = np.std(LT)
             self.varP_DLT = np.std(DLT)
+
+            self.yhighP = max(DLT)/self.varP_DLT
+            self.ylowP = min(DLT)/self.varP_DLT
 
             self.PriorData = np.vstack((LT/self.varP_LT,
                                         DLT/self.varP_DLT)).T
@@ -437,8 +451,41 @@ class Model_selection:
             self.prior_kde = Bounded_2d_kde(self.PriorData,
                                             xlow=0.0,
                                             xhigh=None,
-                                            ylow=None,
-                                            yhigh=None)
+                                            ylow=self.ylowP,
+                                            yhigh=self.yhighP)
+
+            # Sanity Check on prior (making sure my positional args are right)
+            import matplotlib.pyplot as pl
+
+            pl.clf()
+            pl.rcParams.update({'font.size': 18})
+            pl.figure(figsize=(15, 10))
+
+            lambdat_grid = np.linspace(0, np.max(LT), 100)
+            dlambdat_grid = np.linspace(np.min(DLT), np.max(DLT), 100)
+            LT_GRID, DLT_GRID = np.meshgrid(lambdat_grid, dlambdat_grid)
+            grid2D = np.array([LT_GRID, DLT_GRID]).T
+            a, b, c = np.shape(grid2D)
+            grid2D_reshaped = grid2D.reshape(a*b, c)
+            sample_data = np.vstack((LT, DLT)).T
+            kde = Bounded_2d_kde(sample_data, xlow=0.0, xhigh=None, ylow=self.ylowP,
+                                 yhigh=self.yhighP, bw=self.bwP)
+            support2Dgrid = kde.evaluate(grid2D_reshaped)
+            # HERE: I tried using the prior kde I already made above, however it 
+            # seems that gives me "plain" color pcolormesh plots. The only 
+            # difference is that above (Line 448) I use the standard deviation of
+            # lambdat and dlambdat, while here I just feed Bounded_2d_kde the raw
+            # distribution... commented out for now... NEED CONFIRMATION.
+#            support2Dgrid = self.prior_kde.evaluate(grid2D_reshaped)
+            support2D_matrix = support2Dgrid.reshape(len(lambdat_grid),
+                                                     len(dlambdat_grid))
+            pl.pcolormesh(LT_GRID, DLT_GRID, support2D_matrix.T, shading='auto')
+            pl.colorbar()
+            pl.scatter(LT, DLT, marker='.', c='k', s=1.5, alpha=0.1)
+            pl.xlabel("LambdaT")
+            pl.ylabel("dLambdaT")
+            pl.show()
+            # End of Sanity Check
 
         else:
             self.PriorData = None
@@ -446,6 +493,8 @@ class Model_selection:
             self.prior_kde = None
             self.varP_LT = None
             self.varP_DLT = None
+            self.yhighP = None
+            self.ylowP = None
 
         # Attribute that distinguishes parametrization method
         self.spectral = spectral
@@ -731,12 +780,13 @@ class Model_selection:
             future_dict = {"margPostData": self.margPostData, 
                            "PriorData": self.PriorData, "kde": self.kde, 
                            "prior_kde": self.prior_kde, "yhigh": self.yhigh, 
+                           "ylowP": self.ylowP, "yhighP": self.yhighP,
                            "bw": self.bw, "bwP": self.bwP, "q_min": self.q_min,
                            "q_max": self.q_max, "mc_mean": self.mc_mean, "s1": s1,
                            "s2": s2, "max_mass_eos1": max_mass_eos1,
                            "max_mass_eos2": max_mass_eos2, "gridN": gridN, 
-                           "varP_LT": self.varP_LT, "varP_DLT": self.varP_DLT, 
                            "var_LambdaT": self.var_LambdaT, "var_q": self.var_q, 
+                           "varP_LT": self.varP_LT, "varP_DLT": self.varP_DLT, 
                            "minMass": self.minMass, 'trials': this_trials}
             futures.append(get_trials.remote(future_dict))
             if verbose:
