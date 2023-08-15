@@ -421,8 +421,8 @@ class Model_selection:
                 M2 = np.array(M2)
                 M1 = np.array(M1)
     
-                L1, L2 = np.random.normal(Pdata['lambda_1']['kwargs']['minimum'],Pdata['lambda_1']['kwargs']['maximum'],1000),\
-                         np.random.normal(Pdata['lambda_2']['kwargs']['minimum'],Pdata['lambda_2']['kwargs']['maximum'],1000)
+                L1, L2 = np.random.uniform(Pdata['lambda_1']['kwargs']['minimum'],Pdata['lambda_1']['kwargs']['maximum'],1000),\
+                         np.random.uniform(Pdata['lambda_2']['kwargs']['minimum'],Pdata['lambda_2']['kwargs']['maximum'],1000)
 
                 LT = getLambdaT(M1, M2, L1, L2)
                 DLT = getDLambdaT(M1, M2, L1, L2)
@@ -484,7 +484,8 @@ class Model_selection:
             pl.scatter(LT, DLT, marker='.', c='k', s=1.5, alpha=0.1)
             pl.xlabel("LambdaT")
             pl.ylabel("dLambdaT")
-            pl.show()
+#            pl.show()
+#            pl.clf()
             # End of Sanity Check
 
         else:
